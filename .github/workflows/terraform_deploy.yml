@@ -1,0 +1,86 @@
+name: Terraform deploy
+
+on:
+  push:
+    tags:
+      - '*'
+
+jobs:
+  terraform_deploy_job:
+    name: Terraform deploy
+    runs-on: ubuntu-latest
+    # (push to main) or (merged pr to main)
+    # if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.merged == true)
+    steps:
+      #----------------------------------------------
+      # Checkout and install python so that requirements.txt can be generated
+      # for the cloud function.
+      #----------------------------------------------
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up python "3.12"
+        id: setup-python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+          installer-parallel: true
+
+      - name: Generate requirements.txt
+        run: poetry export --without-hashes --output ./cloud_function/requirements.txt
+
+      #----------------------------------------------
+      # Setup gcp SDK.
+      #----------------------------------------------
+
+      - id: 'auth'
+        uses: 'google-github-actions/auth@v2'
+        with:
+          credentials_json: '${{ secrets.GCP_SA_KEY }}'
+
+        #https://github.com/google-github-actions/setup-gcloud?tab=readme-ov-file#workload-identity-federation-preferred
+      - name: 'Set up Cloud SDK'
+        uses: 'google-github-actions/setup-gcloud@v2'
+
+      - name: Set up GCP Credentials
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+        run: |
+          echo "$GCP_SA_KEY" > $HOME/gcp-key.json
+
+      - name: Export GCP Credentials Path
+        run: echo "GOOGLE_APPLICATION_CREDENTIALS=$HOME/gcp-key.json" >> $GITHUB_ENV
+
+      #----------------------------------------------
+      # Run terraform.
+      #----------------------------------------------
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+
+      - name: Extract release version
+        run: |
+          echo "RELEASE_VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+
+      - name: Terraform Init
+        run: terraform -chdir='./tf-infra/app/' init
+        env:
+          TF_VAR_release_version: ${{ env.RELEASE_VERSION }}
+
+      - name: Terraform Plan
+        run: terraform -chdir='./tf-infra/app/' plan  -var-file="terraform.tfvars" -out="tf.plan"
+        env:
+          TF_VAR_release_version: ${{ env.RELEASE_VERSION }}
+
+      - name: Terraform Apply
+        run: terraform -chdir='./tf-infra/app/' apply -input=false -auto-approve "tf.plan"
+        env:
+          TF_VAR_release_version: ${{ env.RELEASE_VERSION }}
